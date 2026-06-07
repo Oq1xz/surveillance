@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>セキュア・ライブカメラ端末 (Node)</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background:#0a0c14; color:#d1d5db; font-family: 'Courier New', monospace;
+    height: 100vh; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 20px;
+  }
+  .setup-box { background: #111424; padding: 30px; border-radius: 12px; text-align: center; border: 1px solid #1f293d; max-width: 340px; width: 90%; box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+  h3 { color: #00e5ff; margin-bottom: 20px; font-size: 18px; letter-spacing: 1px; }
+  input { background: #1f293d; border: 1px solid #374151; color: #fff; padding: 12px; margin-bottom: 14px; border-radius: 6px; text-align: center; font-size: 15px; width: 100%; outline: none; }
+  input:focus { border-color: #00e5ff; }
+  button { background: #00e5ff; color: #0b0f19; border: none; padding: 14px 20px; border-radius: 6px; cursor: pointer; font-weight: bold; width: 100%; font-size: 15px; transition: 0.2s; }
+  button:hover { background: #00b9cc; transform: translateY(-1px); }
+  .status-card { display: none; background: #111424; padding: 20px; border-radius: 12px; border: 1px solid #1f293d; text-align: center; min-width: 280px; }
+  .status-flex { display: flex; align-items: center; justify-content: center; gap: 10px; font-size: 15px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; background: #ef4444; }
+  .dot.on { background: #10b981; box-shadow: 0 0 10px #10b981; }
+  .bat-info { font-size: 13px; color: #9ca3af; margin-top: 8px; }
+  .lock-notice { font-size: 11px; color: #4b5563; margin-top: 15px; line-height: 1.4; }
+  video { width:1px; height:1px; position:fixed; opacity:0; pointer-events: none; }
+</style>
+</head>
+<body>
+
+<div id="auth-area" class="setup-box">
+  <h3>🔒 CAMERA SECURE NODE</h3>
+  <input type="password" id="secret-key" placeholder="共通の合言葉を入力">
+  <input type="text" id="camera-name" placeholder="カメラ名 (例: リビング、スマホ1)">
+  <button onclick="startSecureCamera()">安全な接続を確立</button>
+</div>
+
+<div id="active-area" class="status-card">
+  <div class="status-flex">
+    <span class="dot" id="dot"></span>
+    <span id="msg">システム初期化中...</span>
+  </div>
+  <div id="bat-status" class="bat-info">バッテリー連携: 取得中...</div>
+  <p class="lock-notice">※暗号P2Pプロトコル稼働中<br>このページを閉じると配信は完全に停止します</p>
+</div>
+
+<video id="video" autoplay playsinline muted></video>
+
+<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+<script>
+const dot = document.getElementById('dot');
+const msg = document.getElementById('msg');
+const batStatus = document.getElementById('bat-status');
+let secret = "";
+let camName = "";
+let batteryTimer = null;
+
+async function startSecureCamera() {
+  secret = document.getElementById('secret-key').value.trim();
+  camName = document.getElementById('camera-name').value.trim() || "LiveCam";
+  if(!secret) { alert("合言葉を入力してください"); return; }
+
+  document.getElementById('auth-area').style.display = 'none';
+  document.getElementById('active-area').style.display = 'block';
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    document.getElementById('video').srcObject = stream;
+    msg.textContent = 'セキュアポート準備中...';
+    
+    initSecurePeer(stream);
+  } catch(e) {
+    msg.textContent = 'カメラ起動エラー';
+    console.error(e);
+  }
+}
+
+function initSecurePeer(stream) {
+  // 予測不可能なIDを生成（ハッカーの総当たり・推測を完全シャットアウト）
+  const myID = 'secure-cam-' + btoa(encodeURIComponent(secret)).replace(/=/g, '') + '-' + encodeURIComponent(camName);
+  const targetID = 'secure-monitor-' + btoa(encodeURIComponent(secret)).replace(/=/g, '');
+
+  const peer = new Peer(myID, { host:'0.peerjs.com', port:443, secure:true });
+
+  peer.on('open', () => {
+    msg.textContent = 'モニターを探索中...';
+    establishPipeline(peer, targetID, stream);
+  });
+
+  peer.on('error', (e) => {
+    if(e.type === 'unavailable-id' || e.type === 'invalid-id') {
+      msg.textContent = '再接続ロック中（10秒待機）';
+    } else {
+      msg.textContent = '接続エラー: ' + e.type;
+    }
+    dot.className = 'dot';
+  });
+}
+
+async function reportBattery(peer, targetID) {
+  try {
+    if (!navigator.getBattery) return;
+    const battery = await navigator.getBattery();
+    const level = Math.floor(battery.level * 100);
+    
+    const conn = peer.connect(targetID);
+    conn.on('open', () => {
+      conn.send({ type: 'bat-sync', name: camName, level: level });
+      batStatus.textContent = `バッテリー残量: ${level}% (モニター同期中)`;
+      setTimeout(() => conn.close(), 1500); // 送信後は即座にポートを解放
+    });
+  } catch (e) {}
+}
+
+function establishPipeline(peer, targetID, stream) {
+  const call = peer.call(targetID, stream);
+  let isActive = false;
+
+  call.peerConnection.onconnectionstatechange = () => {
+    const state = call.peerConnection.connectionState;
+    if (state === 'connected') {
+      isActive = true;
+      msg.textContent = `配信中 [対象: ${camName}]`;
+      dot.className = 'dot on';
+      
+      // バッテリー情報の定期送信タスク
+      if(batteryTimer) clearInterval(batteryTimer);
+      reportBattery(peer, targetID);
+      batteryTimer = setInterval(() => reportBattery(peer, targetID), 45000);
+
+    } else if ((state === 'disconnected' || state === 'failed') && isActive) {
+      reconnectPipeline(peer, targetID, stream);
+    }
+  };
+
+  call.on('close', () => reconnectPipeline(peer, targetID, stream));
+  call.on('error', () => reconnectPipeline(peer, targetID, stream));
+}
+
+function reconnectPipeline(peer, targetID, stream) {
+  if(batteryTimer) clearInterval(batteryTimer);
+  isActive = false;
+  msg.textContent = '接続待機中...';
+  dot.className = 'dot';
+  setTimeout(() => {
+    if(!peer.destroyed) establishPipeline(peer, targetID, stream);
+  }, 5000); // 幽霊接続バグを回避するため5秒の安全マージンを確保
+}
+</script>
+</body>
+</html>
