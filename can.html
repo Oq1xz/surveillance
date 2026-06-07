@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>カメラ - camerasaba</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background:#111;
+    color:#eee;
+    font-family: monospace;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+  }
+  .id { font-size: 20px; letter-spacing: 3px; }
+  .status { font-size: 13px; display:flex; align-items:center; gap:8px; }
+  .dot { width:8px; height:8px; border-radius:50%; background:#f55; }
+  .dot.on { background:#4f4; }
+  .hint { font-size: 11px; color: #555; }
+  video { width:1px; height:1px; position:fixed; opacity:0; }
+</style>
+</head>
+<body>
+<div class="id">ID: camerasaba</div>
+<div class="status">
+  <span class="dot" id="dot"></span>
+  <span id="msg">カメラ起動中...</span>
+</div>
+<div class="hint">このウィンドウは最小化してOK</div>
+<video id="video" autoplay playsinline muted></video>
+
+<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+<script>
+const dot = document.getElementById('dot');
+const msg = document.getElementById('msg');
+
+async function main() {
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    document.getElementById('video').srcObject = stream;
+    msg.textContent = 'PeerJSに接続中...';
+  } catch(e) {
+    msg.textContent = 'カメラエラー: ' + e.message;
+    return;
+  }
+
+  const peer = new Peer('camerasaba', { host:'0.peerjs.com', port:443, secure:true });
+
+  peer.on('open', () => {
+    msg.textContent = '監視側に発信中...';
+    doCall();
+  });
+
+  peer.on('error', (e) => {
+    msg.textContent = 'エラー: ' + e.type;
+    dot.className = 'dot';
+  });
+
+  function doCall() {
+    msg.textContent = '監視側(viewersaba)に発信中...';
+    const call = peer.call('viewersaba', stream);
+    let connected = false;
+
+    call.peerConnection.onconnectionstatechange = () => {
+      const state = call.peerConnection.connectionState;
+      if (state === 'connected') {
+        connected = true;
+        msg.textContent = '✅ 送信中（最小化してOK）';
+        dot.className = 'dot on';
+      } else if ((state === 'disconnected' || state === 'failed') && connected) {
+        connected = false;
+        msg.textContent = '切断。再発信中...';
+        dot.className = 'dot';
+        setTimeout(doCall, 3000);
+      }
+    };
+
+    call.on('close', () => {
+      msg.textContent = '切断。再発信中...';
+      dot.className = 'dot';
+      setTimeout(doCall, 3000);
+    });
+
+    call.on('error', () => {
+      msg.textContent = 'エラー。再試行中...';
+      dot.className = 'dot';
+      setTimeout(doCall, 3000);
+    });
+  }
+}
+
+main();
+</script>
+</body>
+</html>
