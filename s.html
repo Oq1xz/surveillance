@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>セキュア・超高画質ライブカメラ端末 (Node)</title>
+<title>セキュア・超高画質ライブカメラ端末 (Multi-Lens Node)</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   body {
@@ -48,15 +48,16 @@
     padding: 12px 30px; border-radius: 30px; font-size: 16px; cursor: pointer;
     backdrop-filter: blur(4px);
   }
+  .lens-info { color: #64748b; font-size: 12px; font-family: monospace; }
   @keyframes pulse { from { opacity: 1; } to { opacity: 0.4; } }
 </style>
 </head>
 <body>
 
 <div id="auth-area" class="setup-box">
-  <h3>🔒 ULTRA-HQ NODE</h3>
+  <h3>🔒 MULTI-LENS NODE</h3>
   <input type="password" id="secret-key" placeholder="共通の合言葉を入力">
-  <input type="text" id="camera-name" placeholder="カメラ名 (例: ビデオカメラ、外カメ)">
+  <input type="text" id="camera-name" placeholder="カメラ名 (例: スマホ、ビデオ)">
   <button onclick="startSecureCamera()">超高画質ストリームを開始</button>
 </div>
 
@@ -71,7 +72,8 @@
 <div id="stealth-screen">
   <div id="stealth-ui" class="stealth-ui">
     <div class="transmit-badge">🔴 超高画質 送信中</div>
-    <button class="switch-btn" onclick="toggleCamera(event)">🔄 カメラ（入力源）切替</button>
+    <button class="switch-btn" onclick="toggleCamera(event)">🔄 次のレンズへ切替</button>
+    <div id="current-lens-label" class="lens-info">Camera ID: Scanning...</div>
   </div>
 </div>
 
@@ -84,42 +86,65 @@ const msg = document.getElementById('msg');
 const batStatus = document.getElementById('bat-status');
 const stealthScreen = document.getElementById('stealth-screen');
 const stealthUI = document.getElementById('stealth-ui');
+const lensLabel = document.getElementById('current-lens-label');
 
 let secret = "";
 let camName = "";
 let batteryTimer = null;
 let currentStream = null;
 let activeCall = null;
-let currentFacingMode = 'environment'; // 初期値はリアカメラ（外カメ）
 let uiTimeout = null;
 
-// ▼ カメラデバイスの取得・初期化（【超高画質】フルHD 1080p / 60fps 仕様）
+// レンズ全スキャン用の変数
+let videoDevices = [];
+let currentDeviceIndex = 0;
+
+// ▼ 利用可能なカメラ（レンズ）をすべてリストアップする
+async function scanCameras() {
+  try {
+    // 最初に一度パーミッションを取得するためにカメラを起動
+    const initStream = await navigator.mediaDevices.getUserMedia({ video: true });
+    initStream.getTracks().forEach(track => track.stop());
+    
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    videoDevices = devices.filter(device => device.kind === 'videoinput');
+    console.log("検出されたレンズ一覧:", videoDevices);
+  } catch (e) {
+    console.error("カメラのスキャンに失敗:", e);
+  }
+}
+
+// ▼ 指定されたレンズのインデックス番号から映像を取得
 async function getMediaStream() {
   if (currentStream) {
     currentStream.getTracks().forEach(t => t.stop());
   }
   
-  const constraints = {
-    video: { 
-      facingMode: currentFacingMode,
-      width: { ideal: 1920, min: 1280 },   // ターゲット解像度を1080pに固定
-      height: { ideal: 1080, min: 720 },
-      frameRate: { ideal: 60, min: 30 }     // ぬるぬる動く60fpsを要求
-    },
-    audio: false
+  // デバイスリストが空ならデフォルト設定
+  const videoConstraints = {
+    width: { ideal: 1920, min: 1280 },
+    height: { ideal: 1080, min: 720 },
+    frameRate: { ideal: 60, min: 30 }
   };
+
+  // スキャンされたレンズがあれば、個別のIDで指定する
+  if (videoDevices.length > 0) {
+    const device = videoDevices[currentDeviceIndex];
+    videoConstraints.deviceId = { exact: device.deviceId };
+    lensLabel.textContent = `INDEX [${currentDeviceIndex}]: ${device.label || 'Unknown Lens'}`;
+  } else {
+    videoConstraints.facingMode = 'environment';
+    lensLabel.textContent = "標準背面カメラ (フォールバック)";
+  }
   
-  currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+  currentStream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: false });
   document.getElementById('video').srcObject = currentStream;
 
-  // 🌟 WebRTCの通信制御レイヤーに直接介入し、超高画質設定を上書き強制する
   applyUltraQualitySettings();
-
   return currentStream;
 }
 
-// ▼ WebRTCのパイプラインに超高画質パラメータを流し込む
-セキュア・高画質化エンジン
+// ▼ 超高画質（5Mbps / 解像度維持）設定の適用
 function applyUltraQualitySettings() {
   if (activeCall && activeCall.peerConnection) {
     const senders = activeCall.peerConnection.getSenders();
@@ -127,44 +152,40 @@ function applyUltraQualitySettings() {
       if (sender.track && sender.track.kind === 'video') {
         const parameters = sender.getParameters();
         if (!parameters.encodings) parameters.encodings = [{}];
-        
-        // 1. 回線がヘタってもブラウザ勝手に解像度を下げる行為を禁止
         parameters.encodings[0].degradationPreference = 'maintain-resolution';
-        
-        // 2. 帯域幅の上限を 5Mbps（5,000,000 bps）まで爆上げしてモザイクを消す
         parameters.encodings[0].maxBitrate = 5000000;
-        
-        sender.setParameters(parameters).catch(e => console.error("画質固定に失敗:", e));
+        sender.setParameters(parameters).catch(e => console.error("画質固定エラー:", e));
       }
     });
   }
 }
 
-// ▼ フロント/リア/外部カメラ（キャプチャーボード）の切替
+// ▼ レンズ切り替え（順次巡回）
 async function toggleCamera(e) {
   e.stopPropagation(); 
-  currentFacingMode = currentFacingMode === 'environment' ? 'user' : 'environment';
+  if (videoDevices.length > 0) {
+    // 次のレンズに進む（最後までいったら0に戻る）
+    currentDeviceIndex = (currentDeviceIndex + 1) % videoDevices.length;
+  }
   
   try {
     const newStream = await getMediaStream();
     
-    // P2P回線を切らずに、映像データ（トラック）だけを瞬時にすり替える
     if (activeCall && activeCall.peerConnection) {
       const videoTrack = newStream.getVideoTracks()[0];
       const sender = activeCall.peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
       if (sender) {
         sender.replaceTrack(videoTrack);
-        // すり替えた新しいカメラにも高画質設定を再適用
         applyUltraQualitySettings();
       }
     }
     showStealthUI();
   } catch (err) {
-    alert("入力ソースの切り替えに失敗しました。ビデオカメラの接続を確認してください。");
+    console.error(err);
   }
 }
 
-// ▼ ステルスタップUI制御（タップして2秒後に消灯）
+// ▼ ステルスタップUI制御
 stealthScreen.addEventListener('click', showStealthUI);
 
 function showStealthUI() {
@@ -175,7 +196,7 @@ function showStealthUI() {
   }, 2000);
 }
 
-// ▼ 初期接続の確立
+// ▼ 初期接続
 async function startSecureCamera() {
   secret = document.getElementById('secret-key').value.trim();
   camName = document.getElementById('camera-name').value.trim() || "LiveCam";
@@ -185,6 +206,7 @@ async function startSecureCamera() {
   document.getElementById('active-area').style.display = 'block';
 
   try {
+    await scanCameras(); // 接続開始前にレンズをすべてリストアップ
     await getMediaStream();
     msg.textContent = 'セキュアポート準備中...';
     initSecurePeer();
@@ -224,11 +246,9 @@ function establishPipeline(peer, targetID) {
     
     if (state === 'connected') {
       isConnected = true;
-      // 接続完了の瞬間に「画面を真っ黒（ステルス）」へ移行
       document.getElementById('active-area').style.display = 'none';
       stealthScreen.style.display = 'flex';
       
-      // 接続された瞬間に高画質設定を適用
       applyUltraQualitySettings();
       
       if(batteryTimer) clearInterval(batteryTimer);
