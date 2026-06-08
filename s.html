@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>セキュア・ライブカメラ端末 (Node)</title>
+<title>セキュア・超高画質ライブカメラ端末 (Node)</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   body {
@@ -34,7 +34,7 @@
   .stealth-ui {
     opacity: 0; transition: opacity 0.3s ease;
     display: flex; flex-direction: column; align-items: center; gap: 30px;
-    pointer-events: none; /* UI外のタップを検知させるため */
+    pointer-events: none;
   }
   .stealth-ui.show { opacity: 1; pointer-events: auto; }
   
@@ -54,10 +54,10 @@
 <body>
 
 <div id="auth-area" class="setup-box">
-  <h3>🔒 CAMERA SECURE NODE</h3>
+  <h3>🔒 ULTRA-HQ NODE</h3>
   <input type="password" id="secret-key" placeholder="共通の合言葉を入力">
-  <input type="text" id="camera-name" placeholder="カメラ名 (例: リビング、スマホ1)">
-  <button onclick="startSecureCamera()">安全な接続を確立</button>
+  <input type="text" id="camera-name" placeholder="カメラ名 (例: ビデオカメラ、外カメ)">
+  <button onclick="startSecureCamera()">超高画質ストリームを開始</button>
 </div>
 
 <div id="active-area" class="status-card">
@@ -70,8 +70,8 @@
 
 <div id="stealth-screen">
   <div id="stealth-ui" class="stealth-ui">
-    <div class="transmit-badge">🔴 送信中</div>
-    <button class="switch-btn" onclick="toggleCamera(event)">🔄 カメラ切替</button>
+    <div class="transmit-badge">🔴 超高画質 送信中</div>
+    <button class="switch-btn" onclick="toggleCamera(event)">🔄 カメラ（入力源）切替</button>
   </div>
 </div>
 
@@ -90,46 +90,81 @@ let camName = "";
 let batteryTimer = null;
 let currentStream = null;
 let activeCall = null;
-let currentFacingMode = 'environment'; // 初期はリアカメラ(外カメ)
+let currentFacingMode = 'environment'; // 初期値はリアカメラ（外カメ）
 let uiTimeout = null;
 
-// ▼ カメラデバイスの取得・初期化
+// ▼ カメラデバイスの取得・初期化（【超高画質】フルHD 1080p / 60fps 仕様）
 async function getMediaStream() {
   if (currentStream) {
     currentStream.getTracks().forEach(t => t.stop());
   }
+  
   const constraints = {
-    video: { facingMode: currentFacingMode },
+    video: { 
+      facingMode: currentFacingMode,
+      width: { ideal: 1920, min: 1280 },   // ターゲット解像度を1080pに固定
+      height: { ideal: 1080, min: 720 },
+      frameRate: { ideal: 60, min: 30 }     // ぬるぬる動く60fpsを要求
+    },
     audio: false
   };
+  
   currentStream = await navigator.mediaDevices.getUserMedia(constraints);
   document.getElementById('video').srcObject = currentStream;
+
+  // 🌟 WebRTCの通信制御レイヤーに直接介入し、超高画質設定を上書き強制する
+  applyUltraQualitySettings();
+
   return currentStream;
 }
 
-// ▼ フロント/リアカメラの動的切り替え
+// ▼ WebRTCのパイプラインに超高画質パラメータを流し込む
+セキュア・高画質化エンジン
+function applyUltraQualitySettings() {
+  if (activeCall && activeCall.peerConnection) {
+    const senders = activeCall.peerConnection.getSenders();
+    senders.forEach(sender => {
+      if (sender.track && sender.track.kind === 'video') {
+        const parameters = sender.getParameters();
+        if (!parameters.encodings) parameters.encodings = [{}];
+        
+        // 1. 回線がヘタってもブラウザ勝手に解像度を下げる行為を禁止
+        parameters.encodings[0].degradationPreference = 'maintain-resolution';
+        
+        // 2. 帯域幅の上限を 5Mbps（5,000,000 bps）まで爆上げしてモザイクを消す
+        parameters.encodings[0].maxBitrate = 5000000;
+        
+        sender.setParameters(parameters).catch(e => console.error("画質固定に失敗:", e));
+      }
+    });
+  }
+}
+
+// ▼ フロント/リア/外部カメラ（キャプチャーボード）の切替
 async function toggleCamera(e) {
-  e.stopPropagation(); // 画面全体のタップ判定を暴発させない
+  e.stopPropagation(); 
   currentFacingMode = currentFacingMode === 'environment' ? 'user' : 'environment';
   
   try {
     const newStream = await getMediaStream();
     
-    // WebRTC通信中なら、映像トラックだけをすり替える（再接続不要）
+    // P2P回線を切らずに、映像データ（トラック）だけを瞬時にすり替える
     if (activeCall && activeCall.peerConnection) {
       const videoTrack = newStream.getVideoTracks()[0];
       const sender = activeCall.peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
       if (sender) {
         sender.replaceTrack(videoTrack);
+        // すり替えた新しいカメラにも高画質設定を再適用
+        applyUltraQualitySettings();
       }
     }
-    showStealthUI(); // 切り替え後もUIの表示時間をリセットしてキープ
+    showStealthUI();
   } catch (err) {
-    alert("カメラの切り替えに失敗しました");
+    alert("入力ソースの切り替えに失敗しました。ビデオカメラの接続を確認してください。");
   }
 }
 
-// ▼ ステルス画面をタップしたときのUI表示処理（2秒後に消去）
+// ▼ ステルスタップUI制御（タップして2秒後に消灯）
 stealthScreen.addEventListener('click', showStealthUI);
 
 function showStealthUI() {
@@ -140,7 +175,7 @@ function showStealthUI() {
   }, 2000);
 }
 
-// ▼ メイン処理の開始
+// ▼ 初期接続の確立
 async function startSecureCamera() {
   secret = document.getElementById('secret-key').value.trim();
   camName = document.getElementById('camera-name').value.trim() || "LiveCam";
@@ -189,16 +224,18 @@ function establishPipeline(peer, targetID) {
     
     if (state === 'connected') {
       isConnected = true;
-      // 接続成功時：ステータス画面を消し、真っ暗なステルス画面へ移行
+      // 接続完了の瞬間に「画面を真っ黒（ステルス）」へ移行
       document.getElementById('active-area').style.display = 'none';
       stealthScreen.style.display = 'flex';
+      
+      // 接続された瞬間に高画質設定を適用
+      applyUltraQualitySettings();
       
       if(batteryTimer) clearInterval(batteryTimer);
       reportBattery(peer, targetID);
       batteryTimer = setInterval(() => reportBattery(peer, targetID), 45000);
 
     } else if ((state === 'disconnected' || state === 'failed') && isConnected) {
-      // 切断時：ステルス画面を解除し、元のステータス画面に戻して再接続を待つ
       stealthScreen.style.display = 'none';
       document.getElementById('active-area').style.display = 'block';
       reconnectPipeline(peer, targetID);
@@ -236,4 +273,4 @@ async function reportBattery(peer, targetID) {
 }
 </script>
 </body>
-</html>f
+</html>
